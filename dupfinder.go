@@ -14,6 +14,7 @@ import (
 	//time"
 	"runtime"
 	"sync"
+	"bufio"
 )
 
 
@@ -65,12 +66,12 @@ func main() {
 	debug = 0
 	
 	// First, scan all the files and add them to their designated list
-	var fileDir string
+	var fileDir, outFile string
         var fastFp bool
 
 	flag.StringVar(&fileDir, "d", ".", "Base directory where to start the recursive search for video files")
         flag.BoolVar(&fastFp, "f", false, "Enable fast-finger printing")
-	//flag.BoolVar(&outFile, "o", "", "File to dump report to)
+	flag.StringVar(&outFile, "o", "", "File to dump report to")
 
 	flag.Parse()
 
@@ -91,8 +92,7 @@ func main() {
 	totalFiles := (len(smallFiles) + len(mediumFiles) + len(largeFiles))
 	
 	var wg sync.WaitGroup
-	//wg.Add( (len(smallFiles) + len(mediumFiles) + len(largeFiles)) )
-	wg.Add( 3)
+	wg.Add(3)
 	
 	fmt.Println("Pushing small files to queue...")
 	for _,obj := range smallFiles {
@@ -114,7 +114,8 @@ func main() {
 	fileList := make(map[string]string, totalFiles)
 	dupFileList := map[string]string{}
 
-	// Place the files on the query	
+	// Now start three seperate threads to process the file queues (small, medium, and large)	
+
 	go func(wg *sync.WaitGroup, jobSmallFiles chan FileObj) {
 		for i := 0; i < len(smallFiles); i++ {		
 			f := <-jobSmallFiles 
@@ -165,7 +166,9 @@ func main() {
 	go func(wg *sync.WaitGroup, jobLargeFiles chan FileObj) {
 		for i := 0; i < len(largeFiles); i++ {		
 			f := <-jobLargeFiles 
-			//fmt.Println("\t***Large File:", f.path)
+			if debug >= 2 {
+				fmt.Println("\t***Large File:", f.path)
+			}
 			md5h,_ := getFileHash(f.path, 4096, true)			
 			md5Hash := hex.EncodeToString(md5h)
 			if _,ok := fileList[md5Hash]; !ok {
@@ -173,7 +176,9 @@ func main() {
 			} else {
 				dupFileList[md5Hash] = f.path
 			}
-			//fmt.Println("\t\tHash:", md5Hash)
+			if debug >= 2 {
+				fmt.Println("\t\tHash:", md5Hash)
+			}
 		}
 		wg.Done()
 	}(&wg, jobLargeFiles)
@@ -189,17 +194,22 @@ func main() {
 	fmt.Println("\tTotal Files:", len(fileList)) 
 	fmt.Println("\tTotal Dups:", len(dupFileList)) 
 
+	if outFile == "" {
+		outFile = "dup-results.txt"
+	}
+	f,_ := os.Create(outFile)
+	defer f.Close()
+	w := bufio.NewWriter(f)
 
-	if debug == 1 {
-		for k,v := range fileList {
-			if _,ok := dupFileList[k]; ok {
-				fmt.Println("Hash:", k)
-				fmt.Println("\toriginal:", v)
-				fmt.Println("\tdup:", dupFileList[k])
-				fmt.Println("-----------------------------")
-			}
+	for k,v := range fileList {
+		if _,ok := dupFileList[k]; ok {
+			_,_ = w.WriteString(fmt.Sprintf("Hash: %s\n\toriginal: %s\n\tdup: %s\n\n", k, v, dupFileList[k]))
 		}
 	}
+
+	w.Flush()
+	//fmt.Printf("wrote %d bytes\n", n4)
+
 	//time.Sleep(4 * 1e9)
 	
 		
@@ -260,13 +270,6 @@ func scanFile(fpath string, f os.FileInfo, err error) error {
 			largeFiles = append(largeFiles, FileObj{path: dir+"/"+fname, size: size})
 		}
 		
-		
-		//md5h,_ := getFileHash(dir+"/"+fname, 4096, false)			
-		//md5Hash := hex.EncodeToString(md5h)
-
-		//var filepath string
-
-
 
 	} // End out else
 
