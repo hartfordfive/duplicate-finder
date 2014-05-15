@@ -9,9 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"path"
-	//"strconv"
-        //"strings"
-	//time"
 	"runtime"
 	"sync"
 	"bufio"
@@ -82,10 +79,6 @@ func main() {
 		fmt.Printf("filepath.Walk() returned %v\n", err)
 	}
 
-	//fmt.Println("Small Files:\n", smallFiles, "\n------------------\n")
-	//fmt.Println("Medium Files:\n", mediumFiles, "\n------------------\n")
-	//fmt.Println("Large Files:\n", largeFiles, "\n------------------\n")
-
 	jobSmallFiles := make(chan FileObj, len(smallFiles))
 	jobMediumFiles := make(chan FileObj, len(mediumFiles))
 	jobLargeFiles := make(chan FileObj, len(largeFiles))
@@ -115,74 +108,9 @@ func main() {
 	dupFileList := map[string]string{}
 
 	// Now start three seperate threads to process the file queues (small, medium, and large)	
-
-	go func(wg *sync.WaitGroup, jobSmallFiles chan FileObj) {
-		for i := 0; i < len(smallFiles); i++ {		
-			f := <-jobSmallFiles 
-			if debug >= 2 {
-				fmt.Println("\t*Small File:", f.path)
-			}
-			md5h,_ := getFileHash(f.path, 4096, true)			
-			md5Hash := hex.EncodeToString(md5h)
-			if _,ok := fileList[md5Hash]; !ok {
-				fileList[md5Hash] = f.path
-			} else {
-				dupFileList[md5Hash] = f.path
-			}
-			if debug >= 2 {
-				fmt.Println("\t\tHash:", md5Hash)
-			}
-
-		}	
-		wg.Done()
-	}(&wg, jobSmallFiles)
-
-		
-	go func(wg *sync.WaitGroup, jobMediumFiles chan FileObj) {
-		for i := 0; i < len(mediumFiles); i++ {		
-			f := <-jobMediumFiles 
-			
-			if debug >= 2 {
-				fmt.Println("\t**Medium File:", f.path)
-			}
-
-			md5h,_ := getFileHash(f.path, 4096, true)			
-			md5Hash := hex.EncodeToString(md5h)
-
-			if _,ok := fileList[md5Hash]; !ok {
-				fileList[md5Hash] = f.path
-			} else {
-				dupFileList[md5Hash] = f.path
-			}
-
-			if debug >= 2 {
-				fmt.Println("\t\tHash:", md5Hash)
-			}
-		}
-		wg.Done()
-	}(&wg, jobMediumFiles)
-
-		
-	go func(wg *sync.WaitGroup, jobLargeFiles chan FileObj) {
-		for i := 0; i < len(largeFiles); i++ {		
-			f := <-jobLargeFiles 
-			if debug >= 2 {
-				fmt.Println("\t***Large File:", f.path)
-			}
-			md5h,_ := getFileHash(f.path, 4096, true)			
-			md5Hash := hex.EncodeToString(md5h)
-			if _,ok := fileList[md5Hash]; !ok {
-				fileList[md5Hash] = f.path
-			} else {
-				dupFileList[md5Hash] = f.path
-			}
-			if debug >= 2 {
-				fmt.Println("\t\tHash:", md5Hash)
-			}
-		}
-		wg.Done()
-	}(&wg, jobLargeFiles)
-
+	go processFileGroup(&wg, jobSmallFiles, fileList, dupFileList)
+	go processFileGroup(&wg, jobMediumFiles, fileList, dupFileList)
+	go processFileGroup(&wg, jobLargeFiles, fileList, dupFileList)
 
 	wg.Wait()
 		
@@ -208,13 +136,43 @@ func main() {
 	}
 
 	w.Flush()
-	//fmt.Printf("wrote %d bytes\n", n4)
-
-	//time.Sleep(4 * 1e9)
-	
-		
 	
 
+}
+
+
+func processFileGroup(wg *sync.WaitGroup, fileGroup chan FileObj, fileList map[string]string, dupFileList map[string]string) {
+	for i := 0; i < len(fileGroup); i++ {		
+		f := <-fileGroup
+		useFastFp := false 
+
+		if debug >= 2 {
+			if f.size < 1048576 {
+				fmt.Println("\t*Small File:", f.path)
+			} else if f.size >= 1048576 && f.size < 21943040{
+				fmt.Println("\t*Medium File:", f.path)
+			} else {
+				fmt.Println("\t*Large File:", f.path)
+			}
+		}
+
+		if f.size < 1048576 {
+			useFastFp = true
+		} 
+		md5h,_ := getFileHash(f.path, 4096, useFastFp)			
+		md5Hash := hex.EncodeToString(md5h)
+		if _,ok := fileList[md5Hash]; !ok {
+			fileList[md5Hash] = f.path
+		} else {
+			dupFileList[md5Hash] = f.path
+		}
+
+		if debug >= 2 {
+			fmt.Println("\t\tHash:", md5Hash)
+		}
+
+	}	
+	wg.Done()
 }
 
 
@@ -257,14 +215,14 @@ func scanFile(fpath string, f os.FileInfo, err error) error {
 	} else if ok {
 		size := finfo.Size()
 		/*
-			Small channel: filesize < 32KB (32768 bytes)
-			Medium channel:  32KB < filesize <= 40MB (41943040 bytes)
+			Small channel: filesize < 1MB (1048576 bytes)
+			Medium channel:  1MB <= filesize <= 40MB (41943040 bytes)
 			Large channel: filesize > 40MB (41943041 bytes)
 		*/
 
-		if size < 32768 {
+		if size < 1048576 {
 			smallFiles = append(smallFiles, FileObj{path: dir+"/"+fname, size: size})
-		} else if size >= 32768 && size < 21943040{
+		} else if size >= 1048576 && size < 21943040{
 			mediumFiles = append(mediumFiles, FileObj{path: dir+"/"+fname, size: size})
 		} else {
 			largeFiles = append(largeFiles, FileObj{path: dir+"/"+fname, size: size})
