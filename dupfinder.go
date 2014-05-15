@@ -54,6 +54,11 @@ var validFileTypes = map[string]int {
 
 func main() {
 
+
+	// Should try convert the app to be more similar to this model
+	// http://golangtutorials.blogspot.ca/2011/06/channels-in-go-range-and-select.html
+	// As a file is scanned, it should be pushed on the chanel be hashed
+
 	if 2 > runtime.NumCPU() {
 		runtime.GOMAXPROCS(runtime.NumCPU())
 	} else {
@@ -104,13 +109,19 @@ func main() {
 
 
 
-	fileList := make(map[string]string, totalFiles)
-	dupFileList := map[string]string{}
+	fileListSmall := make(map[string]string, totalFiles)
+	dupFileListSmall := map[string]string{}
+
+	fileListMedium := make(map[string]string, totalFiles)
+	dupFileListMedium := map[string]string{}
+
+	fileListLarge := make(map[string]string, totalFiles)
+	dupFileListLarge := map[string]string{}
 
 	// Now start three seperate threads to process the file queues (small, medium, and large)	
-	go processFileGroup(&wg, jobSmallFiles, fileList, dupFileList)
-	go processFileGroup(&wg, jobMediumFiles, fileList, dupFileList)
-	go processFileGroup(&wg, jobLargeFiles, fileList, dupFileList)
+	go processFileGroup(&wg, jobSmallFiles, &fileListSmall, &dupFileListSmall)
+	go processFileGroup(&wg, jobMediumFiles, &fileListMedium, &dupFileListMedium)
+	go processFileGroup(&wg, jobLargeFiles, &fileListLarge, &dupFileListLarge)
 
 	wg.Wait()
 		
@@ -119,9 +130,11 @@ func main() {
 	close(jobLargeFiles)
 
 	fmt.Println("Results:") 
-	fmt.Println("\tTotal Files:", len(fileList)) 
-	fmt.Println("\tTotal Dups:", len(dupFileList)) 
+	fmt.Println("\tTotal Files:", (len(fileListSmall)+len(fileListMedium)+len(fileListLarge))) 
+	fmt.Println("\tTotal Dups:", (len(dupFileListSmall)+len(dupFileListMedium)+len(dupFileListLarge))) 
 
+
+	// Now write all the results to a file
 	if outFile == "" {
 		outFile = "dup-results.txt"
 	}
@@ -129,19 +142,30 @@ func main() {
 	defer f.Close()
 	w := bufio.NewWriter(f)
 
-	for k,v := range fileList {
-		if _,ok := dupFileList[k]; ok {
-			_,_ = w.WriteString(fmt.Sprintf("Hash: %s\n\toriginal: %s\n\tdup: %s\n\n", k, v, dupFileList[k]))
+	for k,v := range fileListSmall {
+		if _,ok := dupFileListSmall[k]; ok {
+			_,_ = w.WriteString(fmt.Sprintf("Hash: %s\n\toriginal: %s\n\tdup: %s\n\n", k, v, dupFileListSmall[k]))
+		}
+	}
+	for k,v := range fileListMedium {
+		if _,ok := dupFileListMedium[k]; ok {
+			_,_ = w.WriteString(fmt.Sprintf("Hash: %s\n\toriginal: %s\n\tdup: %s\n\n", k, v, dupFileListMedium[k]))
+		}
+	}
+	for k,v := range fileListLarge {
+		if _,ok := dupFileListLarge[k]; ok {
+			_,_ = w.WriteString(fmt.Sprintf("Hash: %s\n\toriginal: %s\n\tdup: %s\n\n", k, v, dupFileListLarge[k]))
 		}
 	}
 
+	// Flush the buffer to the file
 	w.Flush()
 	
 
 }
 
 
-func processFileGroup(wg *sync.WaitGroup, fileGroup chan FileObj, fileList map[string]string, dupFileList map[string]string) {
+func processFileGroup(wg *sync.WaitGroup, fileGroup chan FileObj, fileList *map[string]string, dupFileList *map[string]string) {
 	for i := 0; i < len(fileGroup); i++ {		
 		f := <-fileGroup
 		useFastFp := false 
@@ -156,15 +180,20 @@ func processFileGroup(wg *sync.WaitGroup, fileGroup chan FileObj, fileList map[s
 			}
 		}
 
+		// If the file is less than 1MB, use the fast-finger print approach
 		if f.size < 1048576 {
 			useFastFp = true
 		} 
+
+		fl := *fileList
+		dl := *dupFileList
 		md5h,_ := getFileHash(f.path, 4096, useFastFp)			
 		md5Hash := hex.EncodeToString(md5h)
-		if _,ok := fileList[md5Hash]; !ok {
-			fileList[md5Hash] = f.path
+
+		if _,ok := fl[md5Hash]; !ok {
+			fl[md5Hash] = f.path
 		} else {
-			dupFileList[md5Hash] = f.path
+			dl[md5Hash] = f.path
 		}
 
 		if debug >= 2 {
@@ -189,13 +218,17 @@ func scanFile(fpath string, f os.FileInfo, err error) error {
 	file, err := os.Open(fpath)
 	defer file.Close()
 	if err != nil {
-		fmt.Println("Error opening file:", err)
+		if debug >= 2 {
+			fmt.Println("Error opening file:", err)
+		}
 		return nil
 	}
 
 	finfo, err := file.Stat()
 	if err != nil {
-		fmt.Println("Error getting file stats:", err)
+		if debug >= 2 {
+			fmt.Println("Error getting file stats:", err)
+		}
 		return nil
 	}
 
