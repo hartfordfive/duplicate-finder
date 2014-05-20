@@ -60,11 +60,8 @@ var validFileTypes = map[string]int {
 func main() {
 
 
-	// Should try convert the app to be more similar to this model
-	// http://golangtutorials.blogspot.ca/2011/06/channels-in-go-range-and-select.html
-	// As a file is scanned, it should be pushed on the chanel be hashed
-
 	if 2 > runtime.NumCPU() {
+		// Use all avaliable CPUs
 		runtime.GOMAXPROCS(runtime.NumCPU())
 	} else {
 		runtime.GOMAXPROCS(2)
@@ -88,11 +85,14 @@ func main() {
 		fmt.Printf("filepath.Walk() returned %v\n", err)
 	}
 
+	// Create the buffered channels that holds the files
 	jobSmallFiles := make(chan FileObj, len(smallFiles))
 	jobMediumFiles := make(chan FileObj, len(mediumFiles))
 	jobLargeFiles := make(chan FileObj, len(largeFiles))
 	totalFiles := (len(smallFiles) + len(mediumFiles) + len(largeFiles))
 	
+
+	// Create the waitgroup for the three file size types	
 	var wg sync.WaitGroup
 	wg.Add(3)
 	
@@ -138,7 +138,7 @@ func main() {
 	fmt.Println("\tTotal Dups:", (len(dupFileListSmall)+len(dupFileListMedium)+len(dupFileListLarge))) 
 
 
-	// Now write all the results to a file
+	// If an output file hasn't been specified, then use the default name
 	if outFile == "" {
 		outFile = "dup-results.txt"
 	}
@@ -146,6 +146,8 @@ func main() {
 	defer f.Close()
 	w := bufio.NewWriter(f)
 
+
+	// Now buffer all the data to the bufio writer
 	for k,v := range fileListSmall {
 		if _,ok := dupFileListSmall[k]; ok {
 			_,_ = w.WriteString(fmt.Sprintf("Hash: %s\n\toriginal: %s\n\tdup: %s\n\n", k, v, dupFileListSmall[k]))
@@ -174,6 +176,7 @@ func processFileGroup(wg *sync.WaitGroup, fileGroup chan FileObj, fileList *map[
 		f := <-fileGroup
 		useFastFp := false 
 
+		// Add some aditional output if debug mode at least 2
 		if debug >= 2 {
 			if f.size < fsizeSmallThreshold {
 				fmt.Println("\t*Small File:", f.path)
