@@ -14,10 +14,15 @@ import (
 	"bufio"
 )
 
+const (
+	fsizeSmallThreshold int = 1048576 // 1MB
+	fsizeMediumThreshold int = 21943040 // 40MB
+)
 
 var numSmallFiles int64
 var numMediumFiles int64
 var numLargeFiles int64
+var maxHashBytes int
 var debug int8
 
 type FileObj struct {
@@ -69,11 +74,10 @@ func main() {
 	
 	// First, scan all the files and add them to their designated list
 	var fileDir, outFile string
-        var fastFp bool
 
 	flag.StringVar(&fileDir, "d", ".", "Base directory where to start the recursive search for video files")
-        flag.BoolVar(&fastFp, "f", false, "Enable fast-finger printing")
 	flag.StringVar(&outFile, "o", "", "File to dump report to")
+	flag.IntVar(&maxHashBytes, "b", 4096, "Max bytes to hash (4096 = default, 0 = whole file)")
 
 	flag.Parse()
 
@@ -171,23 +175,23 @@ func processFileGroup(wg *sync.WaitGroup, fileGroup chan FileObj, fileList *map[
 		useFastFp := false 
 
 		if debug >= 2 {
-			if f.size < 1048576 {
+			if f.size < fsizeSmallThreshold {
 				fmt.Println("\t*Small File:", f.path)
-			} else if f.size >= 1048576 && f.size < 21943040{
+			} else if f.size >= fsizeSmallThreshold && f.size < fsizeMediumThreshold{
 				fmt.Println("\t*Medium File:", f.path)
 			} else {
 				fmt.Println("\t*Large File:", f.path)
 			}
 		}
 
-		// If the file is less than 1MB, use the fast-finger print approach
-		if f.size < 1048576 {
+		// If the file is greater than 1MB, use the fast-finger print approach
+		if f.size > fsizeSmallThreshold {
 			useFastFp = true
 		} 
 
 		fl := *fileList
 		dl := *dupFileList
-		md5h,_ := getFileHash(f.path, 4096, useFastFp)			
+		md5h,_ := getFileHash(f.path, maxHashBytes, useFastFp)			
 		md5Hash := hex.EncodeToString(md5h)
 
 		if _,ok := fl[md5Hash]; !ok {
@@ -253,9 +257,9 @@ func scanFile(fpath string, f os.FileInfo, err error) error {
 			Large channel: filesize > 40MB (41943041 bytes)
 		*/
 
-		if size < 1048576 {
+		if size < fsizeSmallThreshold {
 			smallFiles = append(smallFiles, FileObj{path: dir+"/"+fname, size: size})
-		} else if size >= 1048576 && size < 21943040{
+		} else if size >= fsizeSmallThreshold && size < fsizeMediumThreshold{
 			mediumFiles = append(mediumFiles, FileObj{path: dir+"/"+fname, size: size})
 		} else {
 			largeFiles = append(largeFiles, FileObj{path: dir+"/"+fname, size: size})
