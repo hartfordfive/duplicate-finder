@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	fsizeSmallThreshold int = 1048576 // 1MB
-	fsizeMediumThreshold int = 21943040 // 40MB
+	fsizeSmallThreshold int64 = 1048576 // 1MB
+	fsizeMediumThreshold int64 = 21943040 // 40MB
 )
 
 var numSmallFiles int64
@@ -53,6 +53,7 @@ var validFileTypes = map[string]int {
 		".log": 1,
 		".iso": 1,
 		".deb": 1,
+		".wmv": 1,
 	}
 
 
@@ -60,12 +61,8 @@ var validFileTypes = map[string]int {
 func main() {
 
 
-	if 2 > runtime.NumCPU() {
-		// Use all avaliable CPUs
-		runtime.GOMAXPROCS(runtime.NumCPU())
-	} else {
-		runtime.GOMAXPROCS(2)
-	}
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
 
 	debug = 0
 	
@@ -75,7 +72,6 @@ func main() {
 	flag.StringVar(&fileDir, "d", ".", "Base directory where to start the recursive search for video files")
 	flag.StringVar(&outFile, "o", "", "File to dump report to")
 	flag.IntVar(&maxHashBytes, "b", 4096, "Max bytes to hash (4096 = default, 0 = whole file)")
-
 	flag.Parse()
 
 	fmt.Println("\nScaning all files in: ", fileDir)
@@ -85,47 +81,51 @@ func main() {
 		fmt.Printf("filepath.Walk() returned %v\n", err)
 	}
 
+
+	totalFiles := (len(smallFiles) + len(mediumFiles) + len(largeFiles))
+	// Exit immediately if no files were found
+	if totalFiles == 0 {
+		fmt.Println("No files found!\n")
+		os.Exit(0)
+	}
+
 	// Create the buffered channels that holds the files
 	jobSmallFiles := make(chan FileObj, len(smallFiles))
 	jobMediumFiles := make(chan FileObj, len(mediumFiles))
 	jobLargeFiles := make(chan FileObj, len(largeFiles))
-	totalFiles := (len(smallFiles) + len(mediumFiles) + len(largeFiles))
 	
 
 	// Create the waitgroup for the three file size types	
 	var wg sync.WaitGroup
 	wg.Add(3)
-	
-	fmt.Println("Pushing small files to queue...")
+
+	// Now start three seperate threads to process the file queues (small, medium, and large)	
+	fmt.Println("Adding small files to queue...")
 	for _,obj := range smallFiles {
 		jobSmallFiles <- obj
 	}
+	fileListSmall := map[string]string{}
+	dupFileListSmall := map[string]string{}	
+	go processFileGroup(&wg, jobSmallFiles, &fileListSmall, &dupFileListSmall)
 
-	fmt.Println("Pushing medium files to queue...")
+
+	fmt.Println("Adding medium files to queue...")
 	for _,obj := range mediumFiles {
 		jobMediumFiles <- obj
 	}
+	fileListMedium := map[string]string{}
+	dupFileListMedium := map[string]string{}
+	go processFileGroup(&wg, jobMediumFiles, &fileListMedium, &dupFileListMedium)
 
-	fmt.Println("Pushing large files to queue...")
+
+	fmt.Println("Adding large files to queue...")
 	for _,obj := range largeFiles {
 		jobLargeFiles <- obj
 	}
-
-
-
-	fileListSmall := make(map[string]string, totalFiles)
-	dupFileListSmall := map[string]string{}
-
-	fileListMedium := make(map[string]string, totalFiles)
-	dupFileListMedium := map[string]string{}
-
-	fileListLarge := make(map[string]string, totalFiles)
+	fileListLarge := map[string]string{}
 	dupFileListLarge := map[string]string{}
-
-	// Now start three seperate threads to process the file queues (small, medium, and large)	
-	go processFileGroup(&wg, jobSmallFiles, &fileListSmall, &dupFileListSmall)
-	go processFileGroup(&wg, jobMediumFiles, &fileListMedium, &dupFileListMedium)
 	go processFileGroup(&wg, jobLargeFiles, &fileListLarge, &dupFileListLarge)
+
 
 	wg.Wait()
 		
@@ -134,7 +134,7 @@ func main() {
 	close(jobLargeFiles)
 
 	fmt.Println("Results:") 
-	fmt.Println("\tTotal Files:", (len(fileListSmall)+len(fileListMedium)+len(fileListLarge))) 
+	fmt.Println("\tTotal Files:", totalFiles) 
 	fmt.Println("\tTotal Dups:", (len(dupFileListSmall)+len(dupFileListMedium)+len(dupFileListLarge))) 
 
 
@@ -172,6 +172,7 @@ func main() {
 
 
 func processFileGroup(wg *sync.WaitGroup, fileGroup chan FileObj, fileList *map[string]string, dupFileList *map[string]string) {
+
 	for i := 0; i < len(fileGroup); i++ {		
 		f := <-fileGroup
 		useFastFp := false 
