@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sync"
 	"bufio"
+	"strings"
 )
 
 const (
@@ -23,6 +24,7 @@ var numSmallFiles int64
 var numMediumFiles int64
 var numLargeFiles int64
 var maxHashBytes int
+var fastFingerprint int
 var debug int8
 
 type FileObj struct {
@@ -54,6 +56,9 @@ var validFileTypes = map[string]int {
 		".iso": 1,
 		".deb": 1,
 		".wmv": 1,
+		".html": 1,
+		".css": 1,
+		".js": 1,
 	}
 
 
@@ -64,15 +69,21 @@ func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 
-	debug = 0
+	debug = 1
 	
 	// First, scan all the files and add them to their designated list
 	var fileDir, outFile string
 
-	flag.StringVar(&fileDir, "d", ".", "Base directory where to start the recursive search for video files")
-	flag.StringVar(&outFile, "o", "", "File to dump report to")
+	flag.StringVar(&fileDir, "d", ".", "Directory to scan for files")
 	flag.IntVar(&maxHashBytes, "b", 4096, "Max bytes to hash (4096 = default, 0 = whole file)")
+	flag.IntVar(&fastFingerprint, "f", 1, "Use fast-fingerprint mode (default = true)")
+	flag.StringVar(&outFile, "o", "", "File to dump report to")
 	flag.Parse()
+
+
+	if fastFingerprint == 0 {
+		maxHashBytes = 0
+	}
 
 	fmt.Println("\nScaning all files in: ", fileDir)
 
@@ -96,46 +107,67 @@ func main() {
 	
 
 	// Create the waitgroup for the three file size types	
-	var wg sync.WaitGroup
-	wg.Add(3)
+	var wg2 sync.WaitGroup
+	wg2.Add(3)
 
-	// Now start three seperate threads to process the file queues (small, medium, and large)	
-	fmt.Println("Adding small files to queue...")
+	fileListSmall := map[string]string{}
+	dupFileListSmall := map[string]string{}	
+	fileListMedium := map[string]string{}
+	dupFileListMedium := map[string]string{}
+	fileListLarge := map[string]string{}
+	dupFileListLarge := map[string]string{}	
+
+
+	fmt.Println("")
+	// Push the files into their respective channels to get processed
+	fmt.Println("\tAdding small files to queue...")
+	//fmt.Println("\t\tList size:", len(smallFiles))
 	for _,obj := range smallFiles {
 		jobSmallFiles <- obj
 	}
-	fileListSmall := map[string]string{}
-	dupFileListSmall := map[string]string{}	
-	go processFileGroup(&wg, jobSmallFiles, &fileListSmall, &dupFileListSmall)
 
-
-	fmt.Println("Adding medium files to queue...")
+	fmt.Println("\tAdding medium files to queue...")
+	//fmt.Println("\t\tList size:", len(mediumFiles))
 	for _,obj := range mediumFiles {
+		if debug >= 2 { fmt.Println("DEBUG:", obj) }
 		jobMediumFiles <- obj
 	}
-	fileListMedium := map[string]string{}
-	dupFileListMedium := map[string]string{}
-	go processFileGroup(&wg, jobMediumFiles, &fileListMedium, &dupFileListMedium)
 
-
-	fmt.Println("Adding large files to queue...")
+	fmt.Println("\tAdding large files to queue...")
+	//fmt.Println("\t\tList size:", len(largeFiles))
 	for _,obj := range largeFiles {
+		if debug >= 2 { fmt.Println("DEBUG:", obj) }
 		jobLargeFiles <- obj
 	}
-	fileListLarge := map[string]string{}
-	dupFileListLarge := map[string]string{}
-	go processFileGroup(&wg, jobLargeFiles, &fileListLarge, &dupFileListLarge)
+	fmt.Println("")
 
+	// Now start three seperate threads to process the file queues (small, medium, and large)
+	go func(wg2 *sync.WaitGroup, jobSmallFiles chan FileObj, fileListSmall *map[string]string, dupFileListSmall *map[string]string){
+		fmt.Println("\tProcessing small file group...")
+		processFileGroup(jobSmallFiles, fileListSmall, dupFileListSmall)	
+		wg2.Done()
+	}(&wg2, jobSmallFiles, &fileListSmall, &dupFileListSmall)
 
-	wg.Wait()
-		
-	close(jobSmallFiles)
-	close(jobMediumFiles)
-	close(jobLargeFiles)
+	go func(wg2 *sync.WaitGroup, jobMediumFiles chan FileObj, fileListMedium *map[string]string, dupFileListMedium *map[string]string){
+		fmt.Println("\tProcessing medium file group...")
+		processFileGroup(jobMediumFiles, fileListMedium, dupFileListMedium)
+		wg2.Done()
+	}(&wg2, jobMediumFiles, &fileListMedium, &dupFileListMedium)
 
-	fmt.Println("Results:") 
-	fmt.Println("\tTotal Files:", totalFiles) 
-	fmt.Println("\tTotal Dups:", (len(dupFileListSmall)+len(dupFileListMedium)+len(dupFileListLarge))) 
+	go func(wg2 *sync.WaitGroup, jobLargeFiles chan FileObj, fileListLarge *map[string]string, dupFileListLarge *map[string]string){
+		fmt.Println("\tProcessing large file group...")
+		processFileGroup(jobLargeFiles, fileListLarge, dupFileListLarge)
+		wg2.Done()
+	}(&wg2, jobLargeFiles, &fileListLarge, &dupFileListLarge)
+
+	wg2.Wait()
+
+	fmt.Println("")
+	fmt.Printf("%42s\n", strings.Repeat("-", 43)) 
+	fmt.Printf("|%21s%20s|\n", "Results", "") 
+	fmt.Printf("%42s\n", strings.Repeat("-", 43)) 
+	fmt.Printf("|%20s|%20d|\n", "Total Files ", totalFiles)
+	fmt.Printf("|%20s|%20d|\n", "Total Dups ", (len(dupFileListSmall)+len(dupFileListMedium)+len(dupFileListLarge)))
 
 
 	// If an output file hasn't been specified, then use the default name
@@ -167,13 +199,17 @@ func main() {
 	// Flush the buffer to the file
 	w.Flush()
 	
+	fmt.Printf("|%20s|%20s|\n", "Report File ", outFile)
+	fmt.Println("\n")
 
 }
 
 
-func processFileGroup(wg *sync.WaitGroup, fileGroup chan FileObj, fileList *map[string]string, dupFileList *map[string]string) {
+func processFileGroup(fileGroup chan FileObj, fileList *map[string]string, dupFileList *map[string]string) {
 
-	for i := 0; i < len(fileGroup); i++ {		
+
+	filesInGroup := len(fileGroup)
+	for i := 0; i < filesInGroup; i++ {		
 		f := <-fileGroup
 		useFastFp := false 
 
@@ -186,10 +222,10 @@ func processFileGroup(wg *sync.WaitGroup, fileGroup chan FileObj, fileList *map[
 			} else {
 				fmt.Println("\t*Large File:", f.path)
 			}
-		}
+		} 
 
 		// If the file is greater than 1MB, use the fast-finger print approach
-		if f.size > fsizeSmallThreshold {
+		if f.size > fsizeSmallThreshold && fastFingerprint == 1 {
 			useFastFp = true
 		} 
 
@@ -204,12 +240,12 @@ func processFileGroup(wg *sync.WaitGroup, fileGroup chan FileObj, fileList *map[
 			dl[md5Hash] = f.path
 		}
 
+
 		if debug >= 2 {
 			fmt.Println("\t\tHash:", md5Hash)
 		}
 
 	}	
-	wg.Done()
 }
 
 
@@ -262,10 +298,13 @@ func scanFile(fpath string, f os.FileInfo, err error) error {
 		*/
 
 		if size < fsizeSmallThreshold {
+			//if debug >= 1 { fmt.Println("\t***** Adding File to small list:", fname) }
 			smallFiles = append(smallFiles, FileObj{path: dir+"/"+fname, size: size})
 		} else if size >= fsizeSmallThreshold && size < fsizeMediumThreshold{
+			//if debug >= 1 { fmt.Println("\t***** Adding File to medium list:", fname) }
 			mediumFiles = append(mediumFiles, FileObj{path: dir+"/"+fname, size: size})
 		} else {
+			//if debug >= 1 { fmt.Println("\t***** Adding File to large list:", fname) }
 			largeFiles = append(largeFiles, FileObj{path: dir+"/"+fname, size: size})
 		}
 		
