@@ -19,6 +19,7 @@ or
 
 `-b [READ_MAX_BYTES]` : The max number of bytes to read from a file in order to create the SHA1 hash.  Default is 4096, 0 means read the whole file.
 
+`-f [ENABLE_FAST_FINGERPRINT]` : Enable fast-fingerprint  mode.  If set to 1, then only READ_MAX_BYTES will be read to be hashed, otherwise, the whole file is hashed.
 
 ##Author
 
