@@ -3,7 +3,7 @@ package main
 import (
 	"crypto/sha1"
 	"encoding/hex"
-	"fmt"
+	_ "fmt"
 	"io"
 	"os"
 )
@@ -15,23 +15,24 @@ type File struct {
 	FastFingerprint bool   `json:"FastFingerprint" xml:"fastfingerprint"`
 }
 
-func (this *File) GetFileHash(maxBytes int) (string, int64) {
+func (this *File) GetFileHash(maxBytes int) (string, int64, error) {
 
+	//fmt.Println("\t****GetFileHash: ", this.Path)
 	fi, err := os.Open(this.Path)
 	if err != nil {
-		panic(err)
+		return "", 0, err
 	}
 
 	defer func() {
 		if err := fi.Close(); err != nil {
-			panic(err)
+			return
 		}
 	}()
 
 	// Get the filesize for the fstat system call
 	fstat, err := os.Stat(this.Path)
 	if err != nil {
-		panic(err)
+		return "", 0, err
 	}
 	fSize := fstat.Size()
 
@@ -88,8 +89,7 @@ func (this *File) GetFileHash(maxBytes int) (string, int64) {
 		}
 
 		if err != nil && err != io.EOF {
-			fmt.Println()
-			panic(err)
+			return "", 0, err
 		}
 
 		totalBytes += int64(n)
@@ -105,7 +105,7 @@ func (this *File) GetFileHash(maxBytes int) (string, int64) {
 		}
 
 		if _, err := io.WriteString(hash, string(buf[:n])); err != nil {
-			panic(err)
+			return "", 0, err
 		}
 
 		// If we only want to read a certain ammount of bytes, then return when we reach that number
@@ -114,6 +114,6 @@ func (this *File) GetFileHash(maxBytes int) (string, int64) {
 		}
 	}
 
-	return string(hex.EncodeToString(hash.Sum(nil))), totalBytes
+	return string(hex.EncodeToString(hash.Sum(nil))), totalBytes, nil
 
 }

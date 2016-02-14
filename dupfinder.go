@@ -19,10 +19,13 @@ import (
 	_ "github.com/HouzuoGuo/tiedot/dberr"
 	"sync"
 	//"time"
+	"github.com/steakknife/bloomfilter"
 )
 
 const (
 	fsizeSmallThreshold int64 = 1048576 // 1MB
+	maxElements               = 200000
+	probCollide               = 0.0000001
 )
 
 var maxHashBytes int
@@ -36,6 +39,7 @@ var debug int8
 var dupFileList chan File
 var filesToProcess chan File
 var doneScanning chan bool
+var bf *bloomfilter.Filter
 
 var validFileTypes = map[string]int{
 	".3gp":  1,
@@ -83,12 +87,63 @@ func main() {
 
 	fmt.Println("\nScaning all files in: ", fileDir)
 
+	bf = bloomfilter.NewOptimal(maxElements, probCollide)
+
 	// Start a go routine to gather the list of files
 	go func() {
-		err := filepath.Walk(fileDir, scanFile)
-		if err != nil {
-			fmt.Printf("filepath.Walk() returned %v\n", err)
-		}
+		filepath.Walk(fileDir, func(fpath string, f os.FileInfo, _ error) (err error) {
+			//chann <- path
+			//return
+			fname := filepath.Base(fpath)
+
+			//fmt.Println("Basename:", fname)
+
+			dir, err := filepath.Abs(filepath.Dir(fpath))
+			if err != nil {
+				fmt.Println("\t", err)
+				return
+			}
+
+			// If it's not a file, then return immediately
+			file, err := os.Open(fpath)
+			defer file.Close()
+			if err != nil {
+				if debug >= 2 {
+					fmt.Println("Error opening file:", err)
+				}
+				return
+			}
+
+			finfo, err := file.Stat()
+			if err != nil {
+				if debug >= 2 {
+					fmt.Println("Error getting file stats:", err)
+				}
+				return
+			}
+
+			mode := finfo.Mode()
+
+			if err != nil {
+				return
+			}
+
+			// Ensure that it's a valid file type
+			ext := path.Ext(fname)
+			_, ok := validFileTypes[ext]
+
+			// Ensure that it's not a directory
+			if mode.IsDir() {
+				return
+			} else if ok {
+				size := finfo.Size()
+				// Now simply add the file on the toProcess channel
+				filesToProcess <- File{Path: dir + "/" + fname, Size: size, FastFingerprint: false}
+			}
+
+			return
+		})
+		defer close(filesToProcess)
 	}()
 
 	// ---------- OPEN AND PREP THE DB -----------
@@ -106,20 +161,30 @@ func main() {
 	if err := dbConn.Create("Files"); err != nil {
 		panic(err)
 	}
-
 	if err = dbConn.Create("DuplicateFiles"); err != nil {
 		panic(err)
 	}
 
-	collection_files := dbConn.Use("Files")
+	// Create indices
+	col_files := dbConn.Use("Files")
+	if err := col_files.Index([]string{"Path", "Hash"}); err != nil {
+		panic(err)
+	}
+	if err := col_files.Index([]string{"Path"}); err != nil {
+		panic(err)
+	}
+	if err := col_files.Index([]string{"Hash"}); err != nil {
+		panic(err)
+	}
 
-	if err := collection_files.Index([]string{"Path", "Hash"}); err != nil {
+	col_dup_files := dbConn.Use("Files")
+	if err := col_dup_files.Index([]string{"Path", "Hash"}); err != nil {
 		panic(err)
 	}
-	if err := collection_files.Index([]string{"Path"}); err != nil {
+	if err := col_dup_files.Index([]string{"Path"}); err != nil {
 		panic(err)
 	}
-	if err := collection_files.Index([]string{"Hash"}); err != nil {
+	if err := col_dup_files.Index([]string{"Hash"}); err != nil {
 		panic(err)
 	}
 
@@ -163,97 +228,102 @@ func getDuplicateList() {
 
 func processFiles(wg *sync.WaitGroup, filesToProcess chan File, dupFileList chan File, doneScanning chan bool, dbConn *db.DB) {
 
-	collection_files := dbConn.Use("Files")
+	col_files := dbConn.Use("Files")
+	col_dup_files := dbConn.Use("DuplicateFiles")
 
-	for {
+	for f := range filesToProcess {
 
-		select {
-		case f := <-filesToProcess:
+		//select {
+		//case f := <-filesToProcess:
 
-			// If the file is greater than 1MB, use the fast-finger print approach
-			if f.Size > fsizeSmallThreshold && fastFingerprint == 1 {
-				f.FastFingerprint = true
-			}
+		// If the file is greater than 1MB, use the fast-finger print approach
+		if f.Size > fsizeSmallThreshold && fastFingerprint == 1 {
+			f.FastFingerprint = true
+		}
 
-			md5h, _ := f.GetFileHash(maxHashBytes)
-			f.Hash = md5h
+		md5h, _, err := f.GetFileHash(maxHashBytes)
+		f.Hash = md5h
 
-			fmt.Println("File:", f.Path)
-			fmt.Println("\tHash:", f.Hash)
+		fmt.Println("File:", f.Path)
+		fmt.Println("\tHash:", f.Hash)
+		fmt.Println("\tError:", err)
 
-			// time.Now().Format(time.RFC3339) // Date added
+		// time.Now().Format(time.RFC3339) // Date added
 
-			// Insert document (afterwards the docID uniquely identifies the document and will never change)
-			_, err := collection_files.Insert(map[string]interface{}{
+		// If the hash isn't already in the bloom filter, then add it
+		if !bf.Contains(f.Hash) { // probably true, could be false
+
+			bf.Add(f.Hash)
+			_, err = col_files.Insert(map[string]interface{}{
 				"Path":            f.Path,
 				"Size":            f.Size,
 				"Hash":            f.Hash,
 				"FastFingerprint": f.FastFingerprint})
 
-			if err != nil {
+		} else { // Else a duplicate has hit
+
+			// -------- 1. Find the original file with the given hash ----------
+			var query interface{}
+			json_query := "{\"eq\": \"" + f.Hash + "\", \"in\": [\"Hash\"], \"limit\": 1}"
+			// []byte(`[{"eq": "[HASH]", "in": ["Hash"]}]`)
+
+			json.Unmarshal([]byte(json_query), &query)
+			queryResult := make(map[int]struct{}) // query result (document IDs) goes into map keys
+
+			if err := db.EvalQuery(query, col_files, &queryResult); err != nil {
 				panic(err)
 			}
 
-		case _ = <-doneScanning:
-			if err := dbConn.Close(); err != nil {
-				panic(err)
-			}
-			wg.Done()
-			return
-			//continue CompleteLoop
-		}
+			var duplicates []string
+			for id := range queryResult {
 
+				readBack, err := col_files.Read(id)
+				if err != nil {
+					panic(err)
+				}
+				fmt.Printf("Query returned document %v\n", readBack)
+
+				if _, ok := readBack["DuplicateCopies"]; ok {
+					// Other previously found duplicates, so add this one to the list
+					duplicates = []string{f.Path}
+					for elem := range readBack["DuplicateCopies"].([]string) {
+						// Now add all the previous duplicates to the updatd list
+						duplicates = append(duplicates, elem)
+					}
+					// Finally update the record
+					err = col_files.Update(id, map[string]interface{}{
+						"Path":            readBack["Path"],
+						"Size":            readBack["Size"],
+						"Hash":            readBack["Hash"],
+						"FastFingerprint": readBack["FastFingerprint"],
+						"Duplicates":      duplicates,
+					})
+					if err != nil {
+						panic(err)
+					}
+				} else {
+					// No duplicates logged so far, so add this one as a first
+					// ---------- 3. Update the document with the new duplicate found   ---------
+				}
+			}
+
+			// ---------- 2. Update the document with the new duplicate found   ---------
+
+		/*
+			case _ = <-doneScanning:
+				if err := dbConn.Close(); err != nil {
+					panic(err)
+				}
+				wg.Done()
+				return
+				//continue CompleteLoop
+			}
+		*/
 	}
+
+	wg.Done()
+	return
 
 	//CompleteLoop:
 
-}
-
-func scanFile(fpath string, f os.FileInfo, err error) error {
-
-	fname := filepath.Base(fpath)
-	dir, err := filepath.Abs(filepath.Dir(fpath))
-	if err != nil {
-		fmt.Println("\t", err)
-		return err
-	}
-
-	// If it's not a file, then return immediately
-	file, err := os.Open(fpath)
-	defer file.Close()
-	if err != nil {
-		if debug >= 2 {
-			fmt.Println("Error opening file:", err)
-		}
-		return nil
-	}
-
-	finfo, err := file.Stat()
-	if err != nil {
-		if debug >= 2 {
-			fmt.Println("Error getting file stats:", err)
-		}
-		return nil
-	}
-
-	mode := finfo.Mode()
-
-	if err != nil {
-		return nil
-	}
-
-	// Ensure that it's a valid file type
-	ext := path.Ext(fname)
-	_, ok := validFileTypes[ext]
-
-	// Ensure that it's not a directory
-	if mode.IsDir() {
-		return nil
-	} else if ok {
-		size := finfo.Size()
-		// Now simply add the file on the toProcess channel
-		filesToProcess <- File{Path: dir + "/" + fname, Size: size, FastFingerprint: false}
-	}
-
-	return nil
 }
